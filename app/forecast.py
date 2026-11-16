@@ -3,6 +3,8 @@
 from datetime import datetime, timedelta                 # Times
 from zoneinfo import ZoneInfo                            # Indian time, whatever the server's clock is set to
 from pathlib import Path                                 # Model file location
+import time                                              # Weather cache timing
+import httpx                                             # To recognise HTTP errors in short messages
 import joblib                                            # Load the trained model
 import pandas as pd                                      # Tables
 
@@ -12,6 +14,7 @@ from app.features import build_features                  # Same feature code as 
 MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "model.joblib"
 MAX_DATA_AGE = timedelta(hours=6)                        # Older station data counts as "down" -> fallback
 MIN_FORECAST_HOURS = 12                                  # Need at least this many forecast hours from the station model
+WEATHER_CACHE_SECONDS = 2 * 60 * 60                      # The weather forecast changes slowly: fetch it at most every 2 hours
 
 # India's National AQI categories for PM2.5 (µg/m³), with plain-language advice
 CATEGORIES = [
@@ -24,6 +27,7 @@ CATEGORIES = [
 ]
 
 _bundle = None                                           # The loaded model (loaded once)
+_weather = {"data": None, "time": 0.0}                   # Last weather download (fewer calls = fewer rate limits)
 IST = ZoneInfo("Asia/Kolkata")
 
 
@@ -45,6 +49,22 @@ def model_bundle() -> dict:
     return _bundle
 
 
+def cached_weather() -> pd.DataFrame:
+    """The weather forecast, re-downloaded at most every 2 hours."""
+    if _weather["data"] is None or time.time() - _weather["time"] > WEATHER_CACHE_SECONDS:
+        _weather["data"], _weather["time"] = data_sources.fetch_weather(), time.time()
+    return _weather["data"]
+
+
+def short_reason(e: Exception) -> str:
+    """A short, readable reason for the page (the full error goes to the server log)."""
+    if isinstance(e, httpx.HTTPStatusError):
+        return f"{e.request.url.host} answered HTTP {e.response.status_code}"
+    if isinstance(e, httpx.HTTPError):
+        return f"could not reach {getattr(e.request, 'url', 'a data source')}"
+    return str(e)[:150]
+
+
 def _points(series: pd.Series) -> list[dict]:
     return [{"time": t.to_pydatetime(), "pm25": round(float(v), 1)} for t, v in series.items()]
 
@@ -58,7 +78,7 @@ def station_forecast() -> dict:
     latest = pm25.index.max()
     if now_ist() - latest.to_pydatetime() > MAX_DATA_AGE:
         raise RuntimeError(f"the station's latest data ({latest:%d %b %H:%M}) is too old")
-    weather = data_sources.fetch_weather()
+    weather = cached_weather()
     feats = build_features(pm25, weather)
     rows = feats.loc[latest - timedelta(hours=23): latest, bundle["features"]].dropna()   # The last 24 input hours
     if len(rows) < MIN_FORECAST_HOURS:
@@ -81,10 +101,16 @@ def make_forecast() -> dict:
     try:
         result = station_forecast()
         note = "Forecast by our model from live measurements at the Shadipur station and the weather forecast."
-    except Exception as e:                               # Station feed down, stale or incomplete
-        result = cams_forecast(reason=str(e))
-        note = (f"The Shadipur station data isn't available right now ({e}). Showing the CAMS global-model estimate "
-                "instead, which is usually much less accurate for this location.")
+    except Exception as e:                               # Station feed or weather down, stale or incomplete
+        print(f"[fallback] station forecast failed: {e!r}", flush=True)   # Full detail in the server log
+        result = cams_forecast(reason=short_reason(e))
+        try:                                             # Still show the latest measurements if the station itself works
+            pm25 = data_sources.fetch_station_pm25(hours=24)
+            result["observed"] = pm25
+        except Exception:
+            pass
+        note = (f"Our forecast isn't available right now ({short_reason(e)}). Showing the CAMS global-model estimate "
+                "instead, which is usually much less accurate for this location. Please check again later.")
     fc = result["forecast"]
     upcoming = fc[fc.index >= pd.Timestamp(now_ist()).floor("h")]   # Station data lags ~2-3 h, so the first hours are already past
     summary = upcoming if len(upcoming) >= MIN_FORECAST_HOURS else fc   # Headline numbers describe the hours still to come
