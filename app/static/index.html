@@ -182,8 +182,19 @@
     document.getElementById("content").hidden = false;
   }
 
-  fetch("/api/forecast")
-    .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e.detail || r.statusText)))
+  // The weather comes from the visitor's own browser (Open-Meteo allows this), because Open-Meteo rate-limits the
+  // shared IP addresses of cloud servers. Our server then combines it with the station data and runs the model.
+  const WEATHER_URL = "https://api.open-meteo.com/v1/forecast?latitude=28.646748&longitude=77.17218" +
+    "&hourly=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,wind_speed_10m,wind_direction_10m,surface_pressure,cloud_cover" +
+    "&past_days=5&forecast_days=2&timezone=Asia%2FKolkata";
+  const asJson = r => r.ok ? r.json() : r.json().then(e => Promise.reject(e.detail || r.statusText));
+
+  fetch(WEATHER_URL)
+    .then(asJson)
+    .then(w => fetch("/api/forecast", { method: "POST", headers: { "Content-Type": "application/json" },
+                                          body: JSON.stringify({ hourly: w.hourly }) }))
+    .then(asJson)
+    .catch(() => fetch("/api/forecast").then(asJson))   // If the browser can't get the weather, let the server try
     .then(render)
     .catch(err => {
       document.getElementById("loading").hidden = true;

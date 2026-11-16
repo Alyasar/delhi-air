@@ -15,6 +15,7 @@ MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "model.joblib"
 MAX_DATA_AGE = timedelta(hours=6)                        # Older station data counts as "down" -> fallback
 MIN_FORECAST_HOURS = 12                                  # Need at least this many forecast hours from the station model
 WEATHER_CACHE_SECONDS = 2 * 60 * 60                      # The weather forecast changes slowly: fetch it at most every 2 hours
+STATION_CACHE_SECONDS = 30 * 60                          # The station updates hourly: fetch it at most every 30 minutes
 
 # India's National AQI categories for PM2.5 (µg/m³), with plain-language advice
 CATEGORIES = [
@@ -28,6 +29,7 @@ CATEGORIES = [
 
 _bundle = None                                           # The loaded model (loaded once)
 _weather = {"data": None, "time": 0.0}                   # Last weather download (fewer calls = fewer rate limits)
+_station = {"data": None, "time": 0.0}                   # Last station download (shared by every request)
 IST = ZoneInfo("Asia/Kolkata")
 
 
@@ -56,6 +58,13 @@ def cached_weather() -> pd.DataFrame:
     return _weather["data"]
 
 
+def cached_station_pm25() -> pd.Series:
+    """The station's last 96 hours of PM2.5, re-downloaded at most every 30 minutes."""
+    if _station["data"] is None or time.time() - _station["time"] > STATION_CACHE_SECONDS:
+        _station["data"], _station["time"] = data_sources.fetch_station_pm25(hours=96), time.time()
+    return _station["data"]
+
+
 def short_reason(e: Exception) -> str:
     """A short, readable reason for the page (the full error goes to the server log)."""
     if isinstance(e, httpx.HTTPStatusError):
@@ -69,16 +78,18 @@ def _points(series: pd.Series) -> list[dict]:
     return [{"time": t.to_pydatetime(), "pm25": round(float(v), 1)} for t, v in series.items()]
 
 
-def station_forecast() -> dict:
-    """Forecast for the next 24 hours from the station model. Raises if the live data isn't good enough."""
+def station_forecast(weather: pd.DataFrame | None = None) -> dict:
+    """Forecast for the next 24 hours from the station model. Raises if the live data isn't good enough.
+    weather: hourly weather supplied by the caller (the web page fetches it from the visitor's browser);
+    if None, the server downloads it itself."""
     bundle = model_bundle()
-    pm25 = data_sources.fetch_station_pm25(hours=96)     # 48 h of lags for each of the last 24 input hours
+    pm25 = cached_station_pm25()                         # 48 h of lags for each of the last 24 input hours
     if pm25.empty:
         raise RuntimeError("the station returned no PM2.5 data")
     latest = pm25.index.max()
     if now_ist() - latest.to_pydatetime() > MAX_DATA_AGE:
         raise RuntimeError(f"the station's latest data ({latest:%d %b %H:%M}) is too old")
-    weather = cached_weather()
+    weather = weather if weather is not None else cached_weather()
     feats = build_features(pm25, weather)
     rows = feats.loc[latest - timedelta(hours=23): latest, bundle["features"]].dropna()   # The last 24 input hours
     if len(rows) < MIN_FORECAST_HOURS:
@@ -96,17 +107,17 @@ def cams_forecast(reason: str) -> dict:
             "forecast": cams.loc[now: now + timedelta(hours=23)], "observed": pd.Series(dtype=float)}
 
 
-def make_forecast() -> dict:
+def make_forecast(weather: pd.DataFrame | None = None) -> dict:
     """The full answer the API returns."""
     try:
-        result = station_forecast()
+        result = station_forecast(weather)
         note = "Forecast by our model from live measurements at the Shadipur station and the weather forecast."
     except Exception as e:                               # Station feed or weather down, stale or incomplete
         print(f"[fallback] station forecast failed: {e!r}", flush=True)   # Full detail in the server log
         result = cams_forecast(reason=short_reason(e))
         try:                                             # Still show the latest measurements if the station itself works
-            pm25 = data_sources.fetch_station_pm25(hours=24)
-            result["observed"] = pm25
+            pm25 = cached_station_pm25()
+            result["observed"] = pm25.loc[pm25.index.max() - timedelta(hours=23):]
         except Exception:
             pass
         note = (f"Our forecast isn't available right now ({short_reason(e)}). Showing the CAMS global-model estimate "
