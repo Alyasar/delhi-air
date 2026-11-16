@@ -1,0 +1,7 @@
+Model,MAE,RMSE,R²,Category accuracy
+"P1 full (48 features, not servable)",24.3,44.1,0.568,58.1%
+Servable: PM2.5 + time + weather,24.1,43.7,0.575,59.9%
+Servable: + PM10,24.2,43.9,0.571,60.1%
+Servable: + PM10 + O3,24.2,44.1,0.568,60.0%
+Baseline: same as now,23.4,49.7,0.451,59.0%
+Baseline: last 24h average,23.9,46.2,0.525,59.7%

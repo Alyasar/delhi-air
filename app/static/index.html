@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Delhi Air: tomorrow's pollution forecast</title>
+  <meta name="description" content="Free 24-hour PM2.5 air pollution forecast for Delhi (Shadipur station), with plain-language health advice.">
+  <!-- Chart.js (pinned version) for the 48-hour chart -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root { --bg: #f4f5f7; --card: #ffffff; --text: #1d2433; --muted: #5d6677; --border: #e2e5ea; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #12151b; --card: #1b2029; --text: #e8ebf0; --muted: #9aa3b2; --border: #2a303b; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
+    main { max-width: 760px; margin: 0 auto; padding: 20px 16px 40px; }
+    h1 { font-size: 1.35rem; margin: 0 0 4px; }
+    .sub { color: var(--muted); margin: 0 0 18px; font-size: .95rem; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 18px; margin-bottom: 16px; }
+    .hero { text-align: center; padding: 26px 18px; border-width: 0; color: #111; }
+    .hero .label { font-size: .95rem; opacity: .85; margin-bottom: 6px; }
+    .hero .category { font-size: 2.3rem; font-weight: 800; line-height: 1.1; }
+    .hero .hindi { font-size: 1.1rem; font-weight: 600; opacity: .85; }
+    .hero .value { font-size: 1.05rem; margin-top: 8px; }
+    .advice { font-size: 1.1rem; line-height: 1.45; margin: 0; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; }
+    .row .card { flex: 1 1 200px; margin-bottom: 0; }
+    .small { color: var(--muted); font-size: .9rem; line-height: 1.45; }
+    .big { font-size: 1.5rem; font-weight: 700; }
+    .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-weight: 600; color: #111; font-size: .85rem; }
+    .warning { background: #fff4d6; color: #5c4400; border: 1px solid #f0d58a; }
+    .scale { display: flex; border-radius: 8px; overflow: hidden; margin-top: 8px; }
+    .scale div { flex: 1; text-align: center; font-size: .72rem; padding: 6px 2px; color: #111; }
+    #chart-wrap { position: relative; height: 260px; }
+    footer { color: var(--muted); font-size: .8rem; line-height: 1.5; margin-top: 18px; }
+    a { color: inherit; }
+    .loading { text-align: center; padding: 60px 0; color: var(--muted); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>🌫️ Delhi Air</h1>
+  <p class="sub">Pollution forecast for the next 24 hours · Shadipur, Delhi</p>
+
+  <div id="loading" class="card loading">Loading the latest forecast…</div>
+  <div id="error" class="card warning" hidden></div>
+
+  <div id="content" hidden>
+    <div id="fallback" class="card warning small" hidden></div>
+
+    <!-- The answer, in one glance -->
+    <div id="hero" class="card hero">
+      <div class="label">Next 24 hours</div>
+      <div class="category" id="category"></div>
+      <div class="hindi" id="hindi"></div>
+      <div class="value" id="value"></div>
+    </div>
+
+    <!-- What to do -->
+    <div class="card">
+      <p class="advice" id="advice"></p>
+    </div>
+
+    <div class="row">
+      <div class="card">
+        <div class="small">Worst time</div>
+        <div class="big" id="peak"></div>
+        <div class="small" id="peak-value"></div>
+      </div>
+      <div class="card">
+        <div class="small" id="now-label">Latest measurement</div>
+        <div class="big" id="now"></div>
+        <div id="now-cat"></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <div class="small" style="margin-bottom:8px">Last 24 hours (measured) and next 24 hours (forecast), PM2.5 in µg/m³</div>
+      <div id="chart-wrap"><canvas id="chart"></canvas></div>
+      <div class="scale" id="scale"></div>
+    </div>
+
+    <div class="card small" id="accuracy"></div>
+  </div>
+
+  <footer>
+    PM2.5 = fine particles that reach deep into the lungs. Categories follow India's National AQI breakpoints for PM2.5.
+    This is a forecast, not medical advice. Measurements: CPCB via <a href="https://openaq.org">OpenAQ</a> ·
+    Weather: <a href="https://open-meteo.com">Open-Meteo</a> (CC BY 4.0) ·
+    API docs: <a href="/docs">/docs</a> · Source: <a href="https://github.com/Alyasar/delhi-air">GitHub</a>
+  </footer>
+</main>
+
+<script>
+  // India's National AQI categories for PM2.5, with Hindi names (as used by CPCB)
+  const CATEGORIES = [
+    { max: 30, name: "Good", hindi: "अच्छा", color: "#00b050" },
+    { max: 60, name: "Satisfactory", hindi: "संतोषजनक", color: "#92d050" },
+    { max: 90, name: "Moderate", hindi: "मध्यम", color: "#ffd700" },
+    { max: 120, name: "Poor", hindi: "खराब", color: "#ff9900" },
+    { max: 250, name: "Very Poor", hindi: "बहुत खराब", color: "#ff0000" },
+    { max: Infinity, name: "Severe", hindi: "गंभीर", color: "#a00000" },
+  ];
+  const categoryOf = v => CATEGORIES.find(c => v <= c.max);
+
+  // "2026-11-17T06:00:00" -> "6 AM tomorrow" (times from the API are Indian local time)
+  function friendlyTime(iso, withDay = true) {
+    const t = new Date(iso), now = new Date();
+    const hour = t.toLocaleTimeString("en-IN", { hour: "numeric", hour12: true }).toUpperCase();
+    if (!withDay) return hour;
+    const day = t.toDateString() === now.toDateString() ? "today"
+              : t.getDate() === new Date(now.getTime() + 864e5).getDate() ? "tomorrow"
+              : t.toLocaleDateString("en-IN", { weekday: "short" });
+    return `${hour} ${day}`;
+  }
+
+  function pill(v) {
+    const c = categoryOf(v);
+    return `<span class="pill" style="background:${c.color}">${c.name}</span>`;
+  }
+
+  function render(f) {
+    const cat = categoryOf(f.average_pm25);
+    const hero = document.getElementById("hero");
+    hero.style.background = cat.color;
+    hero.style.color = ["Very Poor", "Severe"].includes(cat.name) ? "#fff" : "#111";
+    document.getElementById("category").textContent = cat.name;
+    document.getElementById("hindi").textContent = cat.hindi;
+    document.getElementById("value").textContent = `Average PM2.5 ≈ ${Math.round(f.average_pm25)} µg/m³`;
+    document.getElementById("advice").textContent = f.category.advice;
+    document.getElementById("peak").textContent = friendlyTime(f.peak_time);
+    document.getElementById("peak-value").innerHTML = `≈ ${Math.round(f.peak_pm25)} µg/m³ ${pill(f.peak_pm25)}`;
+
+    if (f.observed.length) {
+      const last = f.observed[f.observed.length - 1];
+      document.getElementById("now-label").textContent = `Latest measurement (${friendlyTime(last.time)})`;
+      document.getElementById("now").textContent = `${Math.round(last.pm25)} µg/m³`;
+      document.getElementById("now-cat").innerHTML = pill(last.pm25);
+    } else {
+      document.getElementById("now").textContent = "Not available";
+    }
+    if (f.source !== "station_model") {
+      const box = document.getElementById("fallback");
+      box.textContent = "⚠️ " + f.note;
+      box.hidden = false;
+    }
+
+    // Chart: measured (solid) then forecast (dashed), on one time axis
+    const labels = [...f.observed, ...f.forecast].map(p => p.time);
+    const unique = [...new Set(labels)].sort();
+    const at = (list) => unique.map(t => { const p = list.find(x => x.time === t); return p ? p.pm25 : null; });
+    if (window.Chart) new Chart(document.getElementById("chart"), {   // Skip the chart if the CDN is unreachable
+      type: "line",
+      data: {
+        labels: unique.map(t => friendlyTime(t, false)),
+        datasets: [
+          { label: "Measured", data: at(f.observed), borderColor: "#5d6677", borderWidth: 2, pointRadius: 0, spanGaps: true },
+          { label: "Forecast", data: at(f.forecast), borderColor: "#3b6fd4", borderWidth: 2.5, borderDash: [6, 4], pointRadius: 0, spanGaps: true },
+        ],
+      },
+      options: {
+        maintainAspectRatio: false, interaction: { mode: "index", intersect: false },
+        scales: { x: { ticks: { maxTicksLimit: 8 } }, y: { beginAtZero: true } },
+        plugins: { tooltip: { callbacks: { label: c => `${c.dataset.label}: ${Math.round(c.parsed.y)} µg/m³ (${categoryOf(c.parsed.y).name})` } } },
+      },
+    });
+
+    // Category scale under the chart
+    document.getElementById("scale").innerHTML = CATEGORIES.map(c =>
+      `<div style="background:${c.color};color:${["Very Poor","Severe"].includes(c.name) ? "#fff" : "#111"}">${c.name}<br>${c.max === Infinity ? "250+" : "≤" + c.max}</div>`).join("");
+
+    // How good is this forecast? In plain words
+    const m = f.model.test_metrics || {};
+    const updated = f.data_until ? `Based on measurements up to ${friendlyTime(f.data_until)}; station data arrives with a delay of about 2–3 hours.` : "";
+    document.getElementById("accuracy").innerHTML =
+      `<b>How reliable is this?</b> Tested on six months of 2025 it missed by about <b>${Math.round(m.MAE ?? 24)} µg/m³</b> on a typical hour ` +
+      `and made fewer large misses than simply assuming tomorrow will be like today. It picks the right category about ` +
+      `<b>${m["Category accuracy"] ?? "60%"}</b> of the time. ${updated}`;
+
+    document.getElementById("loading").hidden = true;
+    document.getElementById("content").hidden = false;
+  }
+
+  fetch("/api/forecast")
+    .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e.detail || r.statusText)))
+    .then(render)
+    .catch(err => {
+      document.getElementById("loading").hidden = true;
+      const box = document.getElementById("error");
+      box.textContent = "The forecast is temporarily unavailable. Please try again in a few minutes. (" + err + ")";
+      box.hidden = false;
+    });
+</script>
+</body>
+</html>

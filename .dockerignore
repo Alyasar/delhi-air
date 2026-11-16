@@ -1,0 +1,13 @@
+# Secrets: passed in at runtime, never baked into the image
+.env
+# Local environment and caches
+.venv/
+__pycache__/
+.ipynb_checkpoints/
+.pytest_cache/
+.git/
+# Not needed to run the app
+data/
+notebooks/
+reports/
+tests/
